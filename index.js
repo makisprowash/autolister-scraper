@@ -29,39 +29,59 @@ app.post("/scrape", async (req, res) => {
       const getMeta = (n) =>
         document.querySelector(`meta[property="${n}"]`)?.content ||
         document.querySelector(`meta[name="${n}"]`)?.content || "";
+
       const vinMatch = html.match(/\b([A-HJ-NPR-Z0-9]{17})\b/);
       const vin = vinMatch ? vinMatch[1] : "";
-      // Try DOM selectors first (Dealer.com platform)
+
+      // Price — Dealer.com platform selector first
       const priceEl = document.querySelector('.price-value, [class*="final-price"] .price-value, .final-price, [data-style-editor-id*="price-value"]');
       let price = 0;
-      if (priceEl) {
-        price = parseInt(priceEl.textContent.replace(/[^0-9]/g, "")) || 0;
-      }
+      if (priceEl) price = parseInt(priceEl.textContent.replace(/[^0-9]/g, "")) || 0;
       if (!price) {
         const priceMatch = html.match(/\$\s*([\d,]{4,7})/);
         price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, "")) : 0;
       }
-      const mileMatch = html.match(/([\d,]+)\s*(?:miles?|mi\.?)/i);
-      const mileage = mileMatch ? parseInt(mileMatch[1].replace(/,/g, "")) : 0;
+
+      // Mileage — look near "Odometer" label first
+      let mileage = 0;
+      const odomEl = document.querySelector('[class*="odometer"], [class*="mileage"], [data-label*="Odometer"]');
+      if (odomEl) {
+        const m = odomEl.textContent.match(/([\d,]+)/);
+        if (m) mileage = parseInt(m[1].replace(/,/g, ""));
+      }
+      if (!mileage) {
+        const odomLabel = html.match(/[Oo]dometer[^0-9]{0,30}([\d,]+)/);
+        if (odomLabel) mileage = parseInt(odomLabel[1].replace(/,/g, ""));
+      }
+      if (!mileage) {
+        const mileMatch = html.match(/([\d,]{4,7})\s*(?:miles?|mi\.?)/i);
+        mileage = mileMatch ? parseInt(mileMatch[1].replace(/,/g, "")) : 0;
+      }
+
       const title = document.title || getMeta("og:title") || "";
       const ymMatch = title.match(/(\d{4})\s+([A-Za-z\-]+)\s+([\w\s]+)/);
       const year = ymMatch ? parseInt(ymMatch[1]) : 0;
       const make = ymMatch ? ymMatch[2] : "";
       const model = ymMatch ? ymMatch[3].split(/\s+/).slice(0, 2).join(" ").trim() : "";
+
       const description = getMeta("og:description") || getMeta("description") || "";
       const ogImage = getMeta("og:image");
       const imgs = Array.from(document.querySelectorAll("img"))
         .map(i => i.src || i.getAttribute("data-src") || "")
         .filter(s => s.startsWith("http") && !s.includes("logo") && !s.includes("icon") && s.match(/\.(jpg|jpeg|png|webp)(\?|$)/i));
       const photos = [...new Set([...(ogImage ? [ogImage] : []), ...imgs])].slice(0, 20);
+
       const featureEls = document.querySelectorAll('[class*="feature"] li, [class*="option"] li, [class*="equipment"] li');
       const features = Array.from(featureEls).map(el => el.textContent.trim()).filter(f => f.length > 2 && f.length < 60).slice(0, 20);
+
       const stockMatch = html.match(/stock\s*(?:#|number)?:?\s*([A-Z0-9]{4,12})/i);
       const stockNumber = stockMatch ? stockMatch[1] : "";
+
       const extMatch = html.match(/exterior[^:]*:([^\n<,]{3,40})/i);
       const intMatch = html.match(/interior[^:]*:([^\n<,]{3,40})/i);
       const extColor = extMatch ? extMatch[1].trim() : "";
       const intColor = intMatch ? intMatch[1].trim() : "";
+
       return { vin, year, make, model, trim: "", extColor, intColor, mileage, price, stockNumber, features, description, photos };
     });
     await browser.close();
@@ -74,13 +94,26 @@ app.post("/scrape", async (req, res) => {
 });
 
 app.post("/generate", async (req, res) => {
-  const { vehicle } = req.body;
+  const { vehicle, profile } = req.body;
   if (!vehicle) return res.status(400).json({ error: "vehicle required" });
+
   const feats = Array.isArray(vehicle.features) ? vehicle.features.join(", ") : (vehicle.features || "");
   const name = vehicle.title || `${vehicle.year||""} ${vehicle.make||""} ${vehicle.model||""} ${vehicle.trim||""}`.trim();
-  const prompt = `You are Postify AI, expert listing copywriter for Facebook Marketplace at Folsom Lake CDJR in Folsom, CA.
 
-Item: ${name}
+  // Use dealer profile info or fall back to defaults
+  const dealerName = profile?.dealership_name || "Folsom Lake CDJR";
+  const dealerPhone = profile?.phone || "916-461-5883";
+  const dealerAddress = profile?.address || "Folsom, CA";
+  const dealerCTA = profile?.custom_cta || `Call or text ${dealerPhone}. Visit us at ${dealerName}, ${dealerAddress}.`;
+
+  const prompt = `You are Postify AI, expert listing copywriter for Facebook Marketplace.
+
+Dealer: ${dealerName}
+Phone: ${dealerPhone}
+Address: ${dealerAddress}
+
+Vehicle:
+${name}
 Price: $${Number(vehicle.price||0).toLocaleString()}
 Details: ${feats||"N/A"}
 VIN: ${vehicle.vin||"N/A"} | Stock: ${vehicle.stockNumber||"N/A"}
@@ -88,8 +121,10 @@ Mileage: ${vehicle.mileage ? Number(vehicle.mileage).toLocaleString()+" miles" :
 Exterior: ${vehicle.extColor||"N/A"} | Interior: ${vehicle.intColor||"N/A"}
 Notes: ${vehicle.description||""}
 
-Return ONLY valid JSON, no markdown, no explanation:
-{"title":"FB Marketplace title max 100 chars, no emojis","description":"3 paragraphs. Para 1: vehicle appeal. Para 2: key features. Para 3: why buy from Folsom Lake CDJR NorCal.","highlights":["5-7 bullets each starting with a power word like Loaded/One-Owner/Low-Miles"],"financing":"2-3 sentences. Flexible financing, all credit welcome. No specific APR.","cta":"2 sentences. Urgency + contact. Mention Folsom Lake CDJR.","seoTitle":"SEO variant with Folsom CA or NorCal"}`;
+Custom CTA to use at end: ${dealerCTA}
+
+Return ONLY valid JSON, no markdown:
+{"title":"FB Marketplace title max 100 chars, no emojis","description":"3 paragraphs. Para 1: vehicle appeal. Para 2: key features. Para 3: why buy from ${dealerName} — mention location.","highlights":["5-7 bullets each starting with a power word like Loaded/One-Owner/Low-Miles"],"financing":"2-3 sentences. Flexible financing, all credit welcome. No specific APR. Mention ${dealerName}.","cta":"Use the custom CTA provided above, lightly edited for flow.","seoTitle":"SEO variant with city/region from dealer address"}`;
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -100,7 +135,7 @@ Return ONLY valid JSON, no markdown, no explanation:
         "anthropic-version": "2023-06-01"
       },
       body: JSON.stringify({
-       model: "claude-haiku-4-5-20251001",
+        model: "claude-haiku-4-5-20251001",
         max_tokens: 1000,
         messages: [{ role: "user", content: prompt }]
       })
